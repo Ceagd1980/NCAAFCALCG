@@ -1,0 +1,8 @@
+{
+  "name": "ncaaf-radar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Radar de partidos NCAAF con datos de TeamRankings.com",
+  "engines": { "node": ">=18" }
+}
