@@ -63,6 +63,17 @@ input[type=search]{font:600 15px "Barlow Semi Condensed";background:var(--panel)
 .chk{display:flex;align-items:center;gap:5px;color:var(--dim);font-size:14px;white-space:nowrap}
 .controls{flex-wrap:wrap}
 @media (max-width:520px){input[type=search]{width:100%}.team{grid-template-columns:44px 1fr}.team .info{grid-column:2;font-size:13px}}
+.sub{color:var(--dim);font-size:12px}
+.final{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:2px 10px;padding:6px 12px;background:#101634;border-bottom:1px solid var(--line);font-size:14px}
+.final b{font:700 18px Oswald}.final .h{color:var(--home)}.final .a{color:var(--away)}
+.final .chk2{color:var(--dim);font-size:12.5px}
+.final > span:first-child{flex-basis:100%}.ok{color:var(--win)}.bad{color:var(--loss)}
+.flame{font:700 14px Oswald;padding:1px 8px;border-radius:12px;background:#3a2a10;color:var(--amber);white-space:nowrap}
+.flame.hot{background:var(--amber);color:#1a1300}
+.game.hot{border-color:var(--amber)}
+.pct{font:700 16px Oswald;white-space:nowrap}.pct.h{color:var(--home)}.pct.a{color:var(--away)}
+.fav{outline:2px solid var(--amber);outline-offset:-2px;border-radius:4px}
+.calc h4{margin:8px 0 3px;font:600 13px "Barlow Semi Condensed";color:var(--dim)}
 .day{grid-column:1/-1;margin:10px 0 -4px;font:600 18px Oswald,sans-serif;color:var(--amber)}
 .empty{grid-column:1/-1;padding:40px 10px;text-align:center;color:var(--dim)}
 footer{padding:0 20px 28px;color:var(--dim);font-size:13px;max-width:900px}
@@ -80,6 +91,7 @@ details{padding:0 20px 10px;color:var(--dim);font-size:13px}
     <label for="q" class="sr">Buscar equipo o conferencia</label>
     <input type="search" id="q" placeholder="Buscar equipo o conferencia" autocomplete="off">
     <label class="chk"><input type="checkbox" id="full"> Solo con datos</label>
+    <label class="chk" title="Solo partidos donde el local o la visita tiene más de 55% de probabilidad, ordenados de mayor a menor confianza"><input type="checkbox" id="hot"> 🔥 +55%</label>
     <label for="date" class="sr">Semana desde</label>
     <input type="date" id="date">
     <button id="load">Actualizar</button>
@@ -90,6 +102,8 @@ details{padding:0 20px 10px;color:var(--dim);font-size:13px}
 <main id="games"></main>
 <footer>
   <p>Datos: TeamRankings.com. El local se mide con sus números jugando en casa y la visita con sus números fuera. <span class="fb">*</span> = sin partidos en esa condición, se usa el promedio de la temporada.</p>
+  <p>% ganador: ganados ÷ jugados (General = récord total; LL = local en casa; VV = visita fuera). 1X2: Local = (ganados local + perdidos visita) ÷ partidos de ambos; Visita = (ganados visita + perdidos local) ÷ partidos de ambos. 🔥 = probabilidad del favorito (promedio General y LL/VV); los partidos de cada día van de mayor a menor confianza.</p>
+  <p>Partidos ya jugados: se muestra el marcador final, si la 🔥 acertó al ganador y si el total real quedó Over o Under del proyectado.</p>
   <p>Marcador A: local en casa vs visita fuera. B: promedio de temporada de ambos. C: últimos 3 partidos. Total = puntos local + puntos visita. Hándicap = local − visita; si es positivo, el local es favorito por esa cantidad.</p>
 </footer>
 
@@ -161,6 +175,59 @@ function box(t, side) {
   </table></div>`;
 }
 
+// ---------- marcador final (partidos ya jugados) ----------
+// Muestra el resultado y si la llama 🔥 y la proyección de total acertaron
+function finalBox(g, H, A) {
+  if (g.homeScore == null || g.awayScore == null) {
+    return g.result ? `<div class="final"><span>Final: <b>${esc(g.result)}</b></span></div>` : "";
+  }
+  const hs = g.homeScore, as = g.awayScore, total = hs + as;
+  const c = g._conf;
+  let verdict = "";
+  if (c && hs !== as) {
+    const won = (c.side === "Local") === (hs > as);
+    verdict = `<span class="chk2">🔥 ${c.side}: <span class="${won ? "ok" : "bad"}">${won ? "acertó" : "falló"}</span></span>`;
+  }
+  const lh = pick(H.pts, "home").v, la = pick(A.pts, "away").v;
+  const proj = lh != null && la != null ? `<span class="chk2">Total real ${total} · proyectado ${(lh + la).toFixed(1)} (${total > lh + la ? "Over" : "Under"})</span>` : "";
+  return `<div class="final"><span>Final <span class="h">${esc(g.home)}</span> <b class="h">${hs}</b> – <b class="a">${as}</b> <span class="a">${esc(g.away)}</span></span>${verdict}${proj}</div>`;
+}
+
+// ---------- % ganador, 1X2 y confianza 🔥 ----------
+// General = récord total. LL = récord del local EN CASA. VV = récord de la visita FUERA.
+const pctTxt = (v) => (v == null || !isFinite(v) ? "—" : (v * 100).toFixed(1) + "%");
+const recGen = (t) => { const s = t.standing; return s && s.gp ? { w: s.w, l: s.l, t: s.t || 0, gp: s.gp } : null; };
+const recHome = (t) => (t.standing && t.standing.home && t.standing.home.gp ? t.standing.home : null);
+const recRoad = (t) => (t.standing && t.standing.road && t.standing.road.gp ? t.standing.road : null);
+const wp = (r) => (r && r.gp ? r.w / r.gp : null);
+function x12(L, V) {
+  if (!L || !V) return null;
+  const n = L.gp + V.gp;
+  return n ? { h: (L.w + V.l) / n, a: (V.w + L.l) / n } : null;
+}
+function confidence(H, A, neutral) {
+  const xs = [x12(recGen(H), recGen(A)), neutral ? null : x12(recHome(H), recRoad(A))].filter(Boolean);
+  if (!xs.length) return null;
+  const h = xs.reduce((s, x) => s + x.h, 0) / xs.length, a = xs.reduce((s, x) => s + x.a, 0) / xs.length;
+  return h >= a ? { side: "Local", p: h } : { side: "Visita", p: a };
+}
+const HOT = 0.55;
+function probBox(H, A, neutral) {
+  const xg = x12(recGen(H), recGen(A)), xs = neutral ? null : x12(recHome(H), recRoad(A));
+  const pc = (x, k) => (x ? `<span class="pct ${k}${x[k] > x[k === "h" ? "a" : "h"] ? " fav" : ""}">${pctTxt(x[k])}</span>` : "—");
+  const r = (x) => (x ? `<span class="sub">${x.w}-${x.l}${x.t ? "-" + x.t : ""}</span>` : "");
+  return `<h4>% ganador (ganados ÷ jugados)</h4>
+    <table><tr><th></th><th>Local</th><th>Visita</th></tr>
+      <tr><td>General</td><td>${pctTxt(wp(recGen(H)))} ${r(recGen(H))}</td><td>${pctTxt(wp(recGen(A)))} ${r(recGen(A))}</td></tr>
+      <tr><td>LL / VV${neutral ? " (neutral)" : ""}</td><td>${neutral ? "—" : pctTxt(wp(recHome(H))) + " " + r(recHome(H))}</td><td>${neutral ? "—" : pctTxt(wp(recRoad(A))) + " " + r(recRoad(A))}</td></tr>
+    </table>
+    <h4>1X2 · probabilidad de ganar</h4>
+    <table><tr><th></th><th>Local</th><th>Visita</th></tr>
+      <tr><td>General</td><td>${pc(xg, "h")}</td><td>${pc(xg, "a")}</td></tr>
+      <tr><td>LL / VV</td><td>${pc(xs, "h")}</td><td>${pc(xs, "a")}</td></tr>
+    </table>`;
+}
+
 function calc(H, A) {
   const scen = [
     ["A · Casa/fuera", pick(H.pts, "home").v, pick(A.pts, "away").v],
@@ -186,6 +253,8 @@ function calc(H, A) {
   }).join("");
 
   return `<div class="calc">${lineHtml}
+    ${probBox(H, A, H._neutral)}
+    <h4>Marcadores y hándicap</h4>
     <table><tr><th>Marcador posible</th><th>L–V</th><th>Total</th><th>Hándicap</th></tr>${rows}</table>
     <div class="sep"></div>
     <table><tr><th>Estadística</th><th>Total</th><th>Hándicap</th><th>Spread</th></tr>${per}</table>
@@ -222,7 +291,13 @@ function render() {
   const onlyFull = $("#full").checked;
   const hasData = (n) => T[n] && T[n].pts;
   const conf = (n) => (T[n] && T[n].standing && T[n].standing.div) || "";
-  const list = wk.list.filter((g) =>
+  const onlyHot = $("#hot").checked;
+  for (const g of wk.list) {
+    g._conf = confidence({ standing: T[g.home]?.standing }, { standing: T[g.away]?.standing }, g.neutral);
+  }
+  // Dentro de cada día: primero los de mayor confianza
+  wk.list.sort((a, b) => a.date.localeCompare(b.date) || (b._conf?.p ?? -1) - (a._conf?.p ?? -1));
+  const list = wk.list.filter((g) => (!onlyHot || (g._conf && g._conf.p > HOT)) &&
     (!q || [g.home, g.away, conf(g.home), conf(g.away)].some((x) => x.toLowerCase().includes(q))) &&
     (!onlyFull || (hasData(g.home) && hasData(g.away))));
   const hidden = wk.list.length - list.length;
@@ -230,15 +305,19 @@ function render() {
 
   if (!list.length) {
     el.innerHTML = wk.list.length
-      ? `<div class="empty">Ningún partido coincide con el filtro. Borra la búsqueda o desmarca "Solo con datos".</div>`
+      ? `<div class="empty">Ningún partido coincide con los filtros. Borra la búsqueda o desmarca "Solo con datos" / "🔥 +55%".</div>`
       : `<div class="empty">No hay partidos en el calendario. Pulsa Actualizar más tarde.</div>`;
   } else {
     let html = "", day = "";
     for (const g of list) {
       if (g.date !== day) { day = g.date; html += `<h2 class="day">${dayTitle(day)}</h2>`; }
       const H = { name: g.home, ...empty, ...(T[g.home] || {}) }, A = { name: g.away, ...empty, ...(T[g.away] || {}) };
-      html += `<article class="game">
-        <div class="meta"><span>${esc(g.time)}${g.location ? " · " + esc(g.location) : ""}${g.neutral ? " · neutral" : ""}</span></div>
+      H._neutral = g.neutral;
+      const c = g._conf, hot = c && c.p > HOT;
+      const flame = c ? `<span class="flame${hot ? " hot" : ""}" title="Confianza: probabilidad 1X2 del favorito (promedio General y LL/VV)">🔥 ${c.side} ${(c.p * 100).toFixed(0)}%</span>` : "";
+      html += `<article class="game${hot ? " hot" : ""}">
+        <div class="meta"><span>${[g.time, g.location, g.neutral ? "neutral" : ""].filter(Boolean).map(esc).join(" · ")}</span>${flame}</div>
+        ${finalBox(g, H, A)}
         <div class="teams">${teamRow(H, "home")}${teamRow(A, "away")}</div>
         <div class="boxes">${box(H, "home")}${box(A, "away")}</div>
         ${calc(H, A)}
@@ -293,6 +372,7 @@ $("#load").addEventListener("click", load);
 $("#date").addEventListener("change", () => (DATA ? render() : load()));
 $("#q").addEventListener("input", () => DATA && render());
 $("#full").addEventListener("change", () => DATA && render());
+$("#hot").addEventListener("change", () => DATA && render());
 load();
 </script>
 </body>
