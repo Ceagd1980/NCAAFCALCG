@@ -338,9 +338,53 @@ const json = (body, status, extra = {}) =>
     headers: { "Content-Type": "application/json; charset=utf-8", ...extra },
   });
 
-export default async () => {
+// Lista de semanas del selector "Week:" de TeamRankings (<option value="1284">Week 4 ...</option>)
+function parseWeeks(html, requested) {
+  if (!html) return [];
+  const sel = /<select[^>]*(?:week)[^>]*>([\s\S]*?)<\/select>/i.exec(html);
+  const src = sel ? sel[1] : html;
+  const out = [];
+  for (const m of src.matchAll(/<option([^>]*)value="(\d{2,6})"([^>]*)>([\s\S]*?)<\/option>/gi)) {
+    const attrs = m[1] + m[3];
+    out.push({ id: m[2], label: decode(m[4]), selected: requested ? m[2] === requested : /selected/i.test(attrs) });
+  }
+  return out;
+}
+
+// Diagnóstico: /api/ncaaf?debug=weeks → cómo pedir semanas pasadas a TeamRankings
+async function debugWeeks() {
+  const out = {};
+  try {
+    const html = await (await fetch(URLS.schedule, { headers: HEADERS })).text();
+    const opts = [...html.matchAll(/<option[^>]*value="([^"]*)"[^>]*>([\s\S]*?)<\/option>/gi)].map((m) => [m[1], decode(m[2])]).slice(0, 40);
+    const links = [...new Set([...html.matchAll(/href="([^"]*(?:week|date|season|scores)[^"]*)"/gi)].map((m) => m[1]))].slice(0, 40);
+    const dates = parseTables(html).flatMap((t) => t.rows.map((r) => r[0])).filter((c) => /\b(mon|tue|wed|thu|fri|sat|sun)\b/i.test(c || "")).slice(0, 12);
+    out.temporada = { opciones: opts, enlaces: links, fechasEnPagina: dates };
+  } catch (e) { out.temporada = { error: e.message }; }
+  const cands = [
+    `${NCF}/schedules/season/?week=4`, `${NCF}/schedules/season/?date=2026-09-19`,
+    `${NCF}/schedules/?date=2026-09-19`, `${NCF}/scores/?date=2026-09-19`, `${NCF}/scores/`,
+  ];
+  out.pruebas = await Promise.all(cands.map(async (u) => {
+    try {
+      const r = await fetch(u, { headers: HEADERS });
+      const html = await r.text();
+      const t = parseTables(html);
+      return { url: u, status: r.status, tablas: t.length, primeras: t.slice(0, 2).map((x) => x.rows.slice(0, 4)) };
+    } catch (e) { return { url: u, error: e.message }; }
+  }));
+  return out;
+}
+
+export default async (req) => {
+  if (typeof req !== "undefined" && req && new URL(req.url).searchParams.get("debug") === "weeks")
+    return json(await debugWeeks(), 200, { "Cache-Control": "no-store" });
+  // ?week=1284 → semana concreta del calendario de TeamRankings (semanas pasadas o futuras)
+  const weekParam = req ? new URL(req.url).searchParams.get("week") : null;
+  const week = weekParam && /^\d{1,6}$/.test(weekParam) ? weekParam : null;
   const names = ["schedule", "standings", ...STAT_KEYS];
-  const results = await Promise.allSettled(names.map((k) => getHtml(URLS[k])));
+  const urlOf = (k) => (k === "schedule" && week ? `${URLS.schedule}?week=${week}` : URLS[k]);
+  const results = await Promise.allSettled(names.map((k) => getHtml(urlOf(k))));
 
   const warnings = [];
   const html = {};
@@ -390,11 +434,12 @@ export default async () => {
     warnings.push(`Sin estadísticas (normalmente equipos FCS): ${noData.sort().join(", ")}`);
 
   return json(
-    { ok: true, updated: new Date().toISOString(), games, teams, warnings },
+    { ok: true, updated: new Date().toISOString(), games, teams, warnings, weeks: parseWeeks(html.schedule, week), week },
     200,
     {
       "Cache-Control": "public, max-age=0, must-revalidate",
       "Netlify-CDN-Cache-Control": "public, durable, s-maxage=900, stale-while-revalidate=3600",
+      "Netlify-Vary": "query=week",
     }
   );
 };
