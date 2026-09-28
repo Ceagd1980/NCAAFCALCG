@@ -74,6 +74,7 @@ input[type=search]{font:600 15px "Barlow Semi Condensed";background:var(--panel)
 .pct{font:700 16px Oswald;white-space:nowrap}.pct.h{color:var(--home)}.pct.a{color:var(--away)}
 .fav{outline:2px solid var(--amber);outline-offset:-2px;border-radius:4px}
 .calc h4{margin:8px 0 3px;font:600 13px "Barlow Semi Condensed";color:var(--dim)}
+select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:7px 8px;max-width:190px}
 .day{grid-column:1/-1;margin:10px 0 -4px;font:600 18px Oswald,sans-serif;color:var(--amber)}
 .empty{grid-column:1/-1;padding:40px 10px;text-align:center;color:var(--dim)}
 footer{padding:0 20px 28px;color:var(--dim);font-size:13px;max-width:900px}
@@ -93,6 +94,8 @@ details{padding:0 20px 10px;color:var(--dim);font-size:13px}
     <label class="chk"><input type="checkbox" id="full"> Solo con datos</label>
     <label class="chk" title="Solo partidos donde el local o la visita tiene más de 55% de probabilidad, ordenados de mayor a menor confianza"><input type="checkbox" id="hot"> 🔥 +55%</label>
     <label for="date" class="sr">Semana desde</label>
+    <label for="week" class="sr">Semana</label>
+    <select id="week" title="Semana del calendario de TeamRankings"><option value="">Semana actual</option></select>
     <input type="date" id="date">
     <button id="load">Actualizar</button>
   </div>
@@ -338,6 +341,33 @@ function render() {
   $("#warnlist").innerHTML = w.map((x) => `<li>${esc(x)}</li>`).join("");
 }
 
+// ---------- semanas ----------
+let WEEK = "";           // id de semana pedida ("" = la actual de TeamRankings)
+let CURRENT_WEEK = null; // id de la semana actual (la que TeamRankings marca por defecto)
+function fillWeeks(data) {
+  const sel = $("#week"), ws = data.weeks || [];
+  if (!ws.length) return;
+  const cur = ws.find((w) => w.selected);
+  if (!WEEK && cur) CURRENT_WEEK = cur.id;
+  sel.innerHTML = ws.map((w) => `<option value="${esc(w.id)}">${esc(w.label)}${w.id === CURRENT_WEEK ? " (actual)" : ""}</option>`).join("");
+  sel.value = WEEK || (cur ? cur.id : ws[0].id);
+}
+// Martes anterior o igual (las semanas de fútbol universitario van de martes a lunes aprox.)
+function weekStart(iso) { const [y, m, d] = iso.split("-").map(Number); const dt = new Date(y, m - 1, d); dt.setDate(dt.getDate() - ((dt.getDay() + 5) % 7)); return dt; }
+// Si eligen una fecha fuera de la semana cargada, se calcula a qué semana pertenece
+function weekForDate(iso) {
+  const ws = DATA && DATA.weeks || [];
+  const dates = (DATA && DATA.games || []).map((g) => g.date).filter(Boolean).sort();
+  const selId = $("#week").value || CURRENT_WEEK;
+  if (!ws.length || !dates.length || !selId) return null;
+  const diff = Math.round((weekStart(iso) - weekStart(dates[0])) / (7 * 86400000));
+  if (!diff) return null;
+  const i = ws.findIndex((w) => w.id === selId);
+  // el orden de la lista puede ser ascendente o descendente: se usa el id numérico
+  const target = String(Number(selId) + diff);
+  return ws.some((w) => w.id === target) ? target : (i >= 0 && ws[i + diff] ? ws[i + diff].id : null);
+}
+
 async function load() {
   const btn = $("#load");
   btn.disabled = true; btn.textContent = "Cargando…";
@@ -345,13 +375,17 @@ async function load() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 25000);
-    const r = await fetch("/api/ncaaf", { signal: ctrl.signal });
+    const r = await fetch(WEEK ? `/api/ncaaf?week=${WEEK}` : "/api/ncaaf", { signal: ctrl.signal });
     clearTimeout(t);
     let data;
     try { data = await r.json(); } catch { throw new Error(`respuesta no válida (HTTP ${r.status})`); }
     if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
-    try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch {}
+    if (!WEEK) try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch {}
     DATA = data; FROM_CACHE = false;
+    fillWeeks(data);
+    // Al cambiar de semana, la fecha salta al primer día con partidos de esa semana
+    const ds = (data.games || []).map((g) => g.date).filter(Boolean).sort();
+    if (WEEK && ds.length && !(ds[0] <= $("#date").value && $("#date").value <= ds[ds.length - 1])) $("#date").value = ds[0];
     render();
   } catch (e) {
     let saved = null;
@@ -369,7 +403,17 @@ async function load() {
 
 $("#date").value = isoOf(new Date());
 $("#load").addEventListener("click", load);
-$("#date").addEventListener("change", () => (DATA ? render() : load()));
+$("#date").addEventListener("change", () => {
+  if (!DATA) return load();
+  const w = weekForDate($("#date").value);
+  if (w) { WEEK = w === CURRENT_WEEK ? "" : w; $("#week").value = w; return load(); }
+  render();
+});
+$("#week").addEventListener("change", () => {
+  const v = $("#week").value;
+  WEEK = v && v !== CURRENT_WEEK ? v : "";
+  load();
+});
 $("#q").addEventListener("input", () => DATA && render());
 $("#full").addEventListener("change", () => DATA && render());
 $("#hot").addEventListener("change", () => DATA && render());
