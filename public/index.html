@@ -76,6 +76,11 @@ input[type=search]{font:600 15px "Barlow Semi Condensed";background:var(--panel)
 .calc h4{margin:8px 0 3px;font:600 13px "Barlow Semi Condensed";color:var(--dim)}
 select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:7px 8px;max-width:190px}
 .day{grid-column:1/-1;margin:10px 0 -4px;font:600 18px Oswald,sans-serif;color:var(--amber)}
+.fr{font:700 12px Oswald;white-space:nowrap;display:inline-block;padding:0 5px;border-radius:4px;margin-left:6px;vertical-align:3px;cursor:help;background:#2a3263;color:var(--dim)}
+.fr.pos{background:#173d2a;color:var(--win)}.fr.neg{background:#45191d;color:var(--loss)}
+.final.hit{background:#0f2a1c}.final.miss{background:#2e1216}
+.mark{font:700 18px Oswald;margin-left:6px}
+.game.hot{box-shadow:0 0 0 1px var(--amber)}
 .empty{grid-column:1/-1;padding:40px 10px;text-align:center;color:var(--dim)}
 footer{padding:0 20px 28px;color:var(--dim);font-size:13px;max-width:900px}
 footer p{margin:4px 0}
@@ -107,6 +112,7 @@ details{padding:0 20px 10px;color:var(--dim);font-size:13px}
   <p>Datos: TeamRankings.com. El local se mide con sus números jugando en casa y la visita con sus números fuera. <span class="fb">*</span> = sin partidos en esa condición, se usa el promedio de la temporada.</p>
   <p>% ganador: ganados ÷ jugados (General = récord total; LL = local en casa; VV = visita fuera). 1X2: Local = (ganados local + perdidos visita) ÷ partidos de ambos; Visita = (ganados visita + perdidos local) ÷ partidos de ambos. 🔥 = probabilidad del favorito (promedio General y LL/VV); los partidos de cada día van de mayor a menor confianza.</p>
   <p>Partidos ya jugados: se muestra el marcador final, si la 🔥 acertó al ganador y si el total real quedó Over o Under del proyectado.</p>
+  <p>🔥 Confianza: probabilidad 1X2 del favorito (promedio de General y LL/VV); desde 70% la llama y la tarjeta se resaltan. En partidos jugados: ✓ verde si ganó el favorito, ✗ rojo si no. FR = fuerza relativa: de los últimos 5 partidos, +1 por victoria y −1 por derrota (positivo = viene en racha ganadora).</p>
   <p>Marcador A: local en casa vs visita fuera. B: promedio de temporada de ambos. C: últimos 3 partidos. Total = puntos local + puntos visita. Hándicap = local − visita; si es positivo, el local es favorito por esa cantidad.</p>
 </footer>
 
@@ -154,6 +160,57 @@ function streakHtml(s) {
   return `<span class="${c}">${esc(s)}</span>`;
 }
 
+// Fuerza relativa: últimos 5 partidos, +1 por victoria y −1 por derrota (empate 0)
+function frHtml(f) {
+  if (!f || f.fr == null || !f.last || !f.last.length) return "";
+  const det = f.last.map((x) => x.wl + (x.score ? " " + x.score : "") + (x.date ? " (" + x.date.slice(5).split("-").reverse().join("/") + ")" : "")).join(", ");
+  const tip = `Fuerza relativa (últimos ${f.last.length}): ${f.last.map((x) => x.wl).join(" ")} → ${det}`;
+  return `<span class="fr ${f.fr > 0 ? "pos" : f.fr < 0 ? "neg" : ""}" title="${esc(tip)}">FR ${f.fr > 0 ? "+" : ""}${f.fr}</span>`;
+}
+// FR en la fecha del partido: los 5 resultados anteriores a esa fecha
+let FORMS = {}, FORM_WARN = [], FORMS_FOR = "";
+function frAt(list, date) {
+  if (!list || !date) return null;
+  const last = list.filter((x) => x.date < date).slice(-5);
+  return last.length ? { fr: last.reduce((n, x) => n + (x.wl === "W" ? 1 : x.wl === "L" ? -1 : 0), 0), last } : null;
+}
+// Se piden de 10 en 10 equipos (4 llamadas a la vez); la página se actualiza con cada grupo
+async function loadForms() {
+  if (!DATA) return;
+  const want = [...new Set(Object.values(DATA.teams || {}).map((t) => t.path).filter(Boolean))].filter((p) => !FORMS[p]).sort();
+  const tag = want.join(",");
+  if (!want.length || tag === FORMS_FOR) return;
+  FORMS_FOR = tag; FORM_WARN = [];
+  const batches = [];
+  for (let i = 0; i < want.length; i += 10) batches.push(want.slice(i, i + 10));
+  const run = async () => {
+    while (batches.length) {
+      const b = batches.shift();
+      try {
+        const r = await fetch(`/api/ncaaf?part=form&p=${encodeURIComponent(b.join(","))}`);
+        let data;
+        try { data = await r.json(); } catch { throw new Error(`respuesta no válida (HTTP ${r.status})`); }
+        if (data && data.teams) for (const [k, v] of Object.entries(data.teams)) if (Array.isArray(v)) FORMS[k] = v;
+        if (data && data.warnings) FORM_WARN.push(...data.warnings);
+      } catch (e) { FORM_WARN.push(`Fuerza relativa: ${e.message}`); }
+      if (DATA) render();
+    }
+  };
+  await Promise.all([run(), run(), run(), run()]);
+}
+// Marcador de un partido ya jugado sacado de los resultados del equipo (si el calendario no lo trae)
+function scoreFromForms(g, H, A, date) {
+  if (g.homeScore != null || !date) return;
+  const fh = (FORMS[H.path] || []).find((x) => x.date === date);
+  const fa = (FORMS[A.path] || []).find((x) => x.date === date);
+  const src = fh || (fa && { wl: fa.wl === "W" ? "L" : fa.wl === "L" ? "W" : "T", score: fa.score });
+  const m = src && /(\d+)-(\d+)/.exec(src.score || "");
+  if (!m) return;
+  const hi = Math.max(+m[1], +m[2]), lo = Math.min(+m[1], +m[2]);
+  if (src.wl === "T") { g.homeScore = g.awayScore = hi; }
+  else [g.homeScore, g.awayScore] = src.wl === "W" ? [hi, lo] : [lo, hi];
+  g.result = "";
+}
 function teamRow(t, side) {
   const st = t.standing;
   const pct = st && st.pct != null ? (st.pct * 100).toFixed(1) + "%" : "—";
@@ -162,7 +219,7 @@ function teamRow(t, side) {
   const rk = st && st.powerRank ? `<span class="rk">#${st.powerRank}</span>` : "";
   return `<div class="team">
     <span class="tag ${side === "home" ? "h" : "a"}">${side === "home" ? "LOCAL" : "VISITA"}</span>
-    <span class="name">${rk}${esc(t.name)}</span>
+    <span class="name">${rk}${esc(t.name)}${frHtml(t.form)}</span>
     <span class="info"><span class="pos">${pos}</span>${noData ? "" : `<span>${pct}</span>${streakHtml(st && st.streak)}`}</span>
   </div>`;
 }
@@ -186,14 +243,16 @@ function finalBox(g, H, A) {
   }
   const hs = g.homeScore, as = g.awayScore, total = hs + as;
   const c = g._conf;
-  let verdict = "";
+  let verdict = "", cls = "", mark = "";
   if (c && hs !== as) {
     const won = (c.side === "Local") === (hs > as);
-    verdict = `<span class="chk2">🔥 ${c.side}: <span class="${won ? "ok" : "bad"}">${won ? "acertó" : "falló"}</span></span>`;
+    cls = won ? " hit" : " miss";
+    mark = `<span class="mark ${won ? "ok" : "bad"}" title="${won ? "Se acertó el ganador" : "No se acertó el ganador"}">${won ? "✓" : "✗"}</span>`;
+    verdict = `<span class="chk2">🔥 ${c.side} ${(c.p * 100).toFixed(0)}%: <span class="${won ? "ok" : "bad"}">${won ? "acertó" : "falló"}</span></span>`;
   }
   const lh = pick(H.pts, "home").v, la = pick(A.pts, "away").v;
   const proj = lh != null && la != null ? `<span class="chk2">Total real ${total} · proyectado ${(lh + la).toFixed(1)} (${total > lh + la ? "Over" : "Under"})</span>` : "";
-  return `<div class="final"><span>Final <span class="h">${esc(g.home)}</span> <b class="h">${hs}</b> – <b class="a">${as}</b> <span class="a">${esc(g.away)}</span></span>${verdict}${proj}</div>`;
+  return `<div class="final${cls}"><span>Final <span class="h">${esc(g.home)}</span> <b class="h">${hs}</b> – <b class="a">${as}</b> <span class="a">${esc(g.away)}</span>${mark}</span>${verdict}${proj}</div>`;
 }
 
 // ---------- % ganador, 1X2 y confianza 🔥 ----------
@@ -214,7 +273,8 @@ function confidence(H, A, neutral) {
   const h = xs.reduce((s, x) => s + x.h, 0) / xs.length, a = xs.reduce((s, x) => s + x.a, 0) / xs.length;
   return h >= a ? { side: "Local", p: h } : { side: "Visita", p: a };
 }
-const HOT = 0.55;
+const HOT = 0.55; // filtro 🔥 +55%
+const HI = 0.70;  // desde 70% la llama se resalta
 function probBox(H, A, neutral) {
   const xg = x12(recGen(H), recGen(A)), xs = neutral ? null : x12(recHome(H), recRoad(A));
   const pc = (x, k) => (x ? `<span class="pct ${k}${x[k] > x[k === "h" ? "a" : "h"] ? " fav" : ""}">${pctTxt(x[k])}</span>` : "—");
@@ -316,8 +376,10 @@ function render() {
       if (g.date !== day) { day = g.date; html += `<h2 class="day">${dayTitle(day)}</h2>`; }
       const H = { name: g.home, ...empty, ...(T[g.home] || {}) }, A = { name: g.away, ...empty, ...(T[g.away] || {}) };
       H._neutral = g.neutral;
-      const c = g._conf, hot = c && c.p > HOT;
-      const flame = c ? `<span class="flame${hot ? " hot" : ""}" title="Confianza: probabilidad 1X2 del favorito (promedio General y LL/VV)">🔥 ${c.side} ${(c.p * 100).toFixed(0)}%</span>` : "";
+      H.form = frAt(FORMS[H.path], g.date); A.form = frAt(FORMS[A.path], g.date);
+      scoreFromForms(g, H, A, g.date);
+      const c = g._conf, hot = c && c.p >= HI;
+      const flame = c ? `<span class="flame${hot ? " hot" : ""}" title="Confianza: probabilidad 1X2 del favorito (promedio General y LL/VV). Resaltado desde 70%">🔥 ${c.side} ${(c.p * 100).toFixed(0)}%</span>` : "";
       html += `<article class="game${hot ? " hot" : ""}">
         <div class="meta"><span>${[g.time, g.location, g.neutral ? "neutral" : ""].filter(Boolean).map(esc).join(" · ")}</span>${flame}</div>
         ${finalBox(g, H, A)}
@@ -336,7 +398,7 @@ function render() {
     ? `No se pudo conectar con TeamRankings. Mostrando datos guardados del ${when}.`
     : `${list.length} partido(s) ${range ? "del " + range : ""}${hidden ? ` (${hidden} ocultos por el filtro)` : ""}${note} · actualizado ${when}`;
 
-  const w = DATA.warnings || [];
+  const w = [...(DATA.warnings || []), ...FORM_WARN];
   $("#warnbox").hidden = !w.length;
   $("#warnlist").innerHTML = w.map((x) => `<li>${esc(x)}</li>`).join("");
 }
@@ -386,11 +448,11 @@ async function load() {
     // Al cambiar de semana, la fecha salta al primer día con partidos de esa semana
     const ds = (data.games || []).map((g) => g.date).filter(Boolean).sort();
     if (WEEK && ds.length && !(ds[0] <= $("#date").value && $("#date").value <= ds[ds.length - 1])) $("#date").value = ds[0];
-    render();
+    render(); loadForms();
   } catch (e) {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(CACHE_KEY) || "null"); } catch {}
-    if (saved) { DATA = saved; FROM_CACHE = true; render(); }
+    if (saved) { DATA = saved; FROM_CACHE = true; render(); loadForms(); }
     else {
       $("#games").innerHTML = "";
       $("#status").className = "err";
