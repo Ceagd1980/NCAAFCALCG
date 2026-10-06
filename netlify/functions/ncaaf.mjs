@@ -376,7 +376,88 @@ async function debugWeeks() {
   return out;
 }
 
+// ---------- fuerza relativa (FR): resultados de cada equipo desde su página en TeamRankings ----------
+// Las direcciones de las páginas de equipo se toman de los enlaces de las tablas (posiciones y estadísticas).
+function teamPaths(...htmls) {
+  const out = {};
+  const re = /<a[^>]*href="(?:https?:\/\/www\.teamrankings\.com)?(\/[a-z-]+\/team\/[a-z0-9-]+)\/?"[^>]*>([\s\S]*?)<\/a>/gi;
+  for (const html of htmls) {
+    if (!html) continue;
+    let m;
+    while ((m = re.exec(html))) {
+      const txt = decode(m[2]).replace(/\(\d+-\d+(-\d+)?\)/g, "").replace(/^#?\d+\s+/, "").trim();
+      if (!/[a-z]/i.test(txt)) continue;
+      const k = key(txt);
+      if (k && !out[k]) out[k] = m[1];
+    }
+  }
+  return out;
+}
+const FR_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+function frIso(txt, refIso) {
+  const t = String(txt || "").trim();
+  let y = null, mo = null, d = null, m;
+  if ((m = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t))) [y, mo, d] = [+m[1], +m[2], +m[3]];
+  else if ((m = /(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/.exec(t))) { mo = +m[1]; d = +m[2]; if (m[3]) y = +m[3] < 100 ? 2000 + +m[3] : +m[3]; }
+  else if ((m = /([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})/.exec(t)) && FR_MONTHS[m[1].toLowerCase()]) { mo = FR_MONTHS[m[1].toLowerCase()]; d = +m[2]; }
+  if (!mo || !d) return null;
+  if (!y) { const [ry, rm] = refIso.split("-").map(Number); y = mo - rm > 6 ? ry - 1 : rm - mo > 6 ? ry + 1 : ry; }
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+// Todos los resultados de la temporada de un equipo: columna "Result" ("W 88-80") y "Date"
+function parseResults(html, refIso) {
+  const games = [];
+  for (const t of parseTables(html)) {
+    const hi = t.rows.findIndex((r) => r.some((c) => /^result$/i.test(c.trim())));
+    if (hi < 0) continue;
+    const hdr = t.rows[hi].map((c) => c.trim());
+    const iD = hdr.findIndex((c) => /^date$/i.test(c)), iR = hdr.findIndex((c) => /^result$/i.test(c));
+    if (iD < 0) continue;
+    for (const r of t.rows.slice(hi + 1)) {
+      const m = /^([WLT])\b\s*(\d+)\s*[-–]\s*(\d+)/i.exec((r[iR] || "").trim());
+      const date = frIso(r[iD], refIso);
+      if (m && date) games.push({ date, wl: m[1].toUpperCase(), score: `${m[2]}-${m[3]}` });
+    }
+  }
+  return games.sort((a, b) => a.date.localeCompare(b.date));
+}
+async function frFetch(url, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { headers: HEADERS, signal: ctrl.signal, redirect: "follow" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.text();
+  } catch (e) {
+    throw e.name === "AbortError" ? new Error("tiempo de espera agotado") : e;
+  } finally { clearTimeout(timer); }
+}
+const ecToday = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+const PATH_RE = /^\/[a-z-]+\/team\/[a-z0-9-]+$/;
+// ?part=form&p=/ruta1,/ruta2,... (hasta 12 equipos por llamada) → resultados de cada equipo
+async function formResponse(pParam) {
+  const T0 = Date.now(), ref = ecToday();
+  const paths = [...new Set(String(pParam || "").split(",").map((s) => s.trim()).filter((s) => PATH_RE.test(s)))].slice(0, 12);
+  const teams = {}, errs = [];
+  await Promise.all(paths.map(async (p) => {
+    const left = 9000 - (Date.now() - T0);
+    try {
+      const html = await frFetch(`https://www.teamrankings.com${p}`, Math.min(5000, left));
+      if (!/>\s*Result\s*</i.test(html)) { errs.push(`${p.split("/").pop()}: la página no trae la tabla de resultados`); return; }
+      teams[p] = parseResults(html, ref); // vacío = todavía sin partidos jugados
+    } catch (e) { errs.push(`${p.split("/").pop()}: ${e.message}`); }
+  }));
+  const ok = true;
+  return json({ ok, teams, warnings: errs.length ? [`Fuerza relativa: ${errs.join(" · ")}`] : [] }, 200,
+    !errs.length ? {
+      "Cache-Control": "public, max-age=0, must-revalidate",
+      "Netlify-CDN-Cache-Control": "public, durable, s-maxage=1800, stale-while-revalidate=3600",
+      "Netlify-Vary": "query=week|part|p",
+    } : { "Cache-Control": "no-store" });
+}
+
 export default async (req) => {
+  { const qs = req ? new URL(req.url).searchParams : new URLSearchParams(); if (qs.get("part") === "form") return formResponse(qs.get("p")); }
   if (typeof req !== "undefined" && req && new URL(req.url).searchParams.get("debug") === "weeks")
     return json(await debugWeeks(), 200, { "Cache-Control": "no-store" });
   // ?week=1284 → semana concreta del calendario de TeamRankings (semanas pasadas o futuras)
@@ -432,6 +513,11 @@ export default async (req) => {
   for (const g of games) for (const n of [g.home, g.away]) if (!teams[n]) teams[n] = team(n);
   if (noData.length)
     warnings.push(`Sin estadísticas (normalmente equipos FCS): ${noData.sort().join(", ")}`);
+  // Dirección de la página de cada equipo (para la fuerza relativa)
+  const paths = teamPaths(html.standings, ...STAT_KEYS.map((k) => html[k]), html.schedule);
+  const noPath = [];
+  for (const [n, t] of Object.entries(teams)) { t.path = paths[key(n)] || null; if (!t.path && t.pts) noPath.push(n); }
+  if (noPath.length) warnings.push(`Fuerza relativa: sin enlace a la página de ${noPath.sort().join(", ")}`);
 
   return json(
     { ok: true, updated: new Date().toISOString(), games, teams, warnings, weeks: parseWeeks(html.schedule, week), week },
@@ -439,7 +525,7 @@ export default async (req) => {
     {
       "Cache-Control": "public, max-age=0, must-revalidate",
       "Netlify-CDN-Cache-Control": "public, durable, s-maxage=900, stale-while-revalidate=3600",
-      "Netlify-Vary": "query=week",
+      "Netlify-Vary": "query=week|part|p",
     }
   );
 };
